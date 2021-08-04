@@ -1,0 +1,201 @@
+
+```{r}
+setwd("~/Rotation4")
+library(tximport)
+library(dplyr)
+library(sva)
+library(DESeq2)
+
+#txt2 gene was generated using Ensembl. Takes ENS # and looks up all the transcripts and genes 
+txt2gene <- read.csv(file.path("/Users/cynthiaperez818gmail.com/Rotation4/tx2gene_table.csv"))
+#metadata for quantsf files 
+metadata1 <- read.csv(file.path("/Users/cynthiaperez818gmail.com/Rotation4/200221_RNAseq_dataset_v3.csv"))
+mart_export <- read.csv("mart_export.txt")
+file_names = metadata1$FileName
+file_names = file.path("/Users/cynthiaperez818gmail.com/Rotation4/quantsf", file_names)
+names(file_names) = metadata1$FileName
+tx_data <- tximport(file_names, type = "salmon", tx2gene = txt2gene, abundanceCol = "TPM", countsCol = "NumReads", lengthCol = "EffectiveLength" )
+
+#txtimport - Imports transcripts abundances (quantsf files) and create table with un-normalized read counts
+#i-th row (gene) and j-th column (sample)
+
+```
+
+```{r}
+# ComBat_seq is an improved model from ComBat using negative binomial regression, which specifically targets RNA-Seq count data.
+batch_vec = c()
+
+for (i in 1:nrow(metadata1)) {
+  if (metadata1$Group[i] == "Hong") {
+    batch_vec = c(batch_vec, 1)
+  } else if (metadata1$Group[i] == "StJude") {
+    batch_vec = c(batch_vec, 2)
+  } else if (metadata1$Group[i] == "TARGET") {
+    batch_vec = c(batch_vec, 3)
+  } else {
+    batch_vec = c(batch_vec, 4)
+  }
+}
+
+
+combat_data = ComBat_seq(tx_data$counts,
+                         batch = batch_vec,
+                         group = NULL,
+                         full_mod = FALSE)
+```
+
+```{r}
+
+dds2 = DESeqDataSetFromMatrix(countData = round(combat_data), colData = metadata1, design = ~ Primary.Diagnosis)
+#removing counts less than 10 
+keep = rowSums(counts(dds2)) >= 10
+dds2  = dds2[keep,]
+#creating comparison groups Normal vs all other cancers in dataset 
+dds2$Primary.Diagnosis <- relevel(dds2$Primary.Diagnosis, ref = "Normal")
+#differential expression analysis steps are wrapped into a single function, DESeq
+# user specifies the comparison to build a results table for, using the name or contrast 
+#I specified the name would be Primary.Diagnosis then created the relevels 
+dds_DEseq2 <- DESeq(dds2)
+dds_DEseq2 <- dds_DEseq2[- which(mcols(dds_DEseq2)$betaConv == FALSE), ]
+#Results tables are generated using the function results, which extracts a results table with log2 fold changes, p values and adjusted p values. 
+res2 <- results(dds_DEseq2)
+```
+
+```{r}
+#creating normalized counts
+norm_dds_DEseq <- counts(dds_DEseq2, normalized = T)
+
+GSEA_format <- data.frame(norm_dds_DEseq)
+GSEA_format <- cbind(row.names(GSEA_format), GSEA_format)
+
+colnames(GSEA_format)[1] = "NAME"
+
+#maniplulating expression dataset to GSEA format 
+#gene stable ID to gene name which is what's needed for GSEA 
+for (i in 1:46893){
+  rn_mart <-which(GSEA_format[i,1] == mart_export$Gene.stable.ID.version)
+  if (length(rn_mart) == 0){
+    GSEA_format[i,1] = "REMOVE_LATER"
+  } else {
+    GSEA_format[i,1] = mart_export$Gene.name[rn_mart[1]]
+  }
+}
+rownames(GSEA_format) <- c()
+#only distinct gene names; removing duplciates 
+GSEA_format <- GSEA_format %>% distinct(NAME, .keep_all = TRUE)
+#removing only NA value 
+GSEA_format = GSEA_format[-3, ]
+write.table(GSEA_format, file = "GSEA_format_NormalvsEverythingElse.txt", sep="\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+```
+
+```{r}
+#Transcripts Per Million (TPM). used to measure transcript expression levels
+#for each quantsf file I identified the predominant transcript for gene DDX6. I was going to order primers to amplify DDX6 in my cells I wanted to see if the transcript for DDX6 was the same. 
+setwd("~/Rotation4/quantsf")
+all_files <- list.files()
+DDX6_Transcript_Names = mart_export$Transcript.stable.ID.version[which(mart_export$Gene.name == "DDX6")]
+tpm_table = data.frame("file_name" = NA , "transcript_name" = NA , "TPM" = NA)
+for (f in 1:332){
+  file1 = read.table(all_files[f], header = T)
+  rownames(file1) = file1$Name
+  subset_file1 = file1[DDX6_Transcript_Names,c(1,4)]
+  max_DDX6 = which.max(subset_file1$TPM)
+  tpm_table[f, ] = c(all_files[f], subset_file1$Name[max_DDX6], subset_file1$TPM[max_DDX6])
+}
+tpm_table
+```
+
+```{r}
+#VST is to remove the dependence of the variance on the mean, particularly the high variance of the logarithm of count data when the mean is low
+#The transformed data should be approximated variance stabilized and also includes correction for size factors or normalization factors. The transformed data is on the log2 scale for large counts.
+
+dds_combat_norm = vst(dds2)
+normalized_counts_combat = assay(dds_combat_norm) %>%
+  t()
+
+```
+
+```{r}
+setwd("~/Rotation4/Degredation_Pathway")
+#DG list of genes found in the degredation pathway 
+DG <- read.csv("geneset-5.txt", header = F)
+
+
+# naming columns in normalized counts combat to gene name 
+for ( i in 1:47113){
+gene_index = which(colnames(normalized_counts_combat)[i] == mart_export$Gene.stable.ID.version)
+
+colnames(normalized_counts_combat)[i] = mart_export$Gene.name[gene_index[1]]  
+}
+
+#rows are each sample 
+dot_data_1 = data.frame(row.names = row.names(normalized_counts_combat))
+#reducing normalized_counts_combat table to genes only found in DG 
+for (k in 1:59){
+  g = DG[k,1]
+dot_data_1[,paste0(g)] = normalized_counts_combat[ , which(colnames(normalized_counts_combat) == g)]
+}
+
+
+dot_data_2 = subset(dot_data_1, select= -c(CNOT1, PAPOLA))
+plot_df_gene = dot_data_2 %>%
+  # Turn sample IDs stored as row names into a column
+  tibble::rownames_to_column("FileName") %>%
+  dplyr::inner_join(metadata1, by = "FileName")
+  
+```
+
+```{r}
+#plotting expression of each gene in DG 
+plot_list1 = list()
+DG_names = colnames(dot_data_2)
+num = 1
+for (i in DG_names){
+plot_list1[[num]] = ggplot(plot_df_gene,
+                         aes_string(x = "Primary.Diagnosis",
+                             y = i)) +
+  geom_dotplot(binaxis = "y",
+               fill = "white",
+               stackdir = "center",
+               binpositions="all",
+               # position = “dodge”,
+               binwidth = 0.01,
+               dotsize = 0.35,
+               stackratio =1,
+               # alpha = 0.8,
+               stackgroups = FALSE,
+               drop = TRUE) +
+  theme_classic() +
+  # geom_point(color="grey1", size = 0.2) +
+  theme(aspect.ratio = 1,
+        axis.text.x = element_text(size = 10,
+                                 family = "sans",
+                                 angle = 90),
+        axis.text.y = element_text(size = 10,
+                                   family = "sans"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 10,
+                                    family = "sans"),
+        plot.title = element_blank(),
+        # axis.line = element_line(colour = ‘black’, size = 1),
+        legend.position = "none") +
+  stat_summary(fun=median, geom="crossbar", size=0.1, color="red") +
+  #ylim(3.5,4) +
+  scale_color_brewer(palette = "Dark2") +
+  ylab(i) + scale_y_continuous(trans = "log2")
+print(plot_list1[[num]])
+num = num + 1
+
+}
+```
+
+```{r}
+#saving all plots in pdf 
+pdf("plots.pdf")
+for ( i in 1:57){
+  print(plot_list1[[i]])
+}
+dev.off()
+```
+
+
