@@ -1,5 +1,8 @@
 #calculated the number impairments for each patient 
 #determined if patient had an impairment represented as a boolean  
+
+#NOVI_24mo - metadata 
+#bmiqset methylation data 
 load("NOVI_24mo_outcome.RData")
 load("bmiqSet.Rdata")
 
